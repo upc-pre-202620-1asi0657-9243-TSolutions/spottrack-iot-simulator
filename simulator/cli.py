@@ -74,6 +74,7 @@ def _render_stats(stats):
         "Simulator",
         f"  uptime            {stats['uptimeSeconds']}s",
         f"  emission loop     {_ok(stats['loopRunning'])} (every {stats['emitIntervalSeconds']}s)",
+        f"  heartbeat         {_ok(stats['heartbeatRunning'])} (every {stats['heartbeatIntervalSeconds']}s)",
         f"  devices loaded    {stats['deviceCount']}",
         f"  last device sync  {_ago(stats['lastUpdateAt'])}",
         f"  backend           {stats['backendDevicesUrl']}",
@@ -86,6 +87,8 @@ def _render_stats(stats):
         f"  failed            {mqtt_stats['failed']}",
         f"  awaiting confirm  {mqtt_stats['pending']}",
         f"  last signal       {_ago(mqtt_stats['lastPublishAt'])}",
+        f"  heartbeats sent   {mqtt_stats['heartbeats']}",
+        f"  last heartbeat    {_ago(mqtt_stats['lastHeartbeatAt'])}",
     ]
     if stats.get("lastUpdateError"):
         lines.append(_color(f"  device sync error {stats['lastUpdateError']}", YELLOW))
@@ -138,6 +141,7 @@ def cmd_serve(args):
         publisher=publisher,
         backend_devices_url=args.backend_url,
         emit_interval_seconds=args.interval,
+        heartbeat_interval_seconds=args.heartbeat_interval,
     )
     api.run(host=args.host, port=args.port)
 
@@ -149,6 +153,7 @@ def cmd_health(args):
     print(f"simulator      {_ok(body['status'] == 'ok')}")
     print(f"mqtt connected {_ok(body['mqttConnected'])}")
     print(f"loop running   {_ok(body['loopRunning'])}")
+    print(f"heartbeat      {_ok(body['heartbeatRunning'])}")
     print(f"devices        {body['deviceCount']}")
     print(f"uptime         {body['uptimeSeconds']}s")
 
@@ -219,6 +224,16 @@ def cmd_loop(args):
         print(_color(f"Failed: {body.get('message')}", RED))
         raise SystemExit(1)
     print(f"loop running   {_ok(body['loopRunning'])}")
+
+
+def cmd_heartbeat(args):
+    code, body = _request(args, "POST", "/heartbeat", json={"action": args.action})
+    if args.json:
+        return _emit_json(body)
+    if code != 200:
+        print(_color(f"Failed: {body.get('message')}", RED))
+        raise SystemExit(1)
+    print(f"heartbeat      {_ok(body['heartbeatRunning'])}")
 
 
 def cmd_watch(args):
@@ -302,6 +317,9 @@ def build_parser():
     p.add_argument("--backend-url", default=BACKEND_DEVICES_URL)
     p.add_argument("--interval", type=int, default=int(os.environ.get("EMIT_INTERVAL_SECONDS", 8)),
                    help="seconds between emitted signals")
+    p.add_argument("--heartbeat-interval", type=int,
+                   default=int(os.environ.get("HEARTBEAT_INTERVAL_SECONDS", 10)),
+                   help="seconds between heartbeats of each device")
     p.add_argument("--min-duration-min", type=int, default=5, help="minimum signal duration in minutes")
     p.add_argument("--max-duration-min", type=int, default=20, help="maximum signal duration in minutes")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -327,6 +345,10 @@ def build_parser():
     p = sub.add_parser("loop", parents=[common], help="start or stop the emission loop")
     p.add_argument("action", choices=["start", "stop"])
     p.set_defaults(func=cmd_loop)
+
+    p = sub.add_parser("heartbeat", parents=[common], help="start or stop the device heartbeats")
+    p.add_argument("action", choices=["start", "stop"])
+    p.set_defaults(func=cmd_heartbeat)
 
     p = sub.add_parser("watch", parents=[common], help="live dashboard, refreshed periodically")
     p.add_argument("--interval", type=float, default=2.0)
