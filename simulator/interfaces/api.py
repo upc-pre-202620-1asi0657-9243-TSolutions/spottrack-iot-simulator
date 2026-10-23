@@ -20,18 +20,22 @@ class SimulatorApi:
         generator: SignalGenerator,
         publisher: MqttPublisher,
         backend_devices_url: str,
-        emit_interval_seconds: int = 8
+        emit_interval_seconds: int = 8,
+        heartbeat_interval_seconds: int = 10
     ):
         self._generator = generator
         self._publisher = publisher
         self._backend_devices_url = backend_devices_url
         self._emit_interval_seconds = emit_interval_seconds
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._device_ids = []
         self._started_at = datetime.now(timezone.utc)
         self._last_update_at = None
         self._last_update_error = None
         self._loop_enabled = threading.Event()
         self._loop_enabled.set()
+        self._heartbeat_enabled = threading.Event()
+        self._heartbeat_enabled.set()
         self._app = Flask(__name__)
         self._register_routes()
 
@@ -55,6 +59,7 @@ class SimulatorApi:
                 "uptimeSeconds": round((datetime.now(timezone.utc) - self._started_at).total_seconds(), 1),
                 "mqttConnected": self._publisher.is_connected,
                 "loopRunning": self._loop_enabled.is_set(),
+                "heartbeatRunning": self._heartbeat_enabled.is_set(),
                 "deviceCount": len(self._device_ids),
             }), 200
 
@@ -92,6 +97,8 @@ class SimulatorApi:
                 "startedAt": self._started_at.isoformat(),
                 "emitIntervalSeconds": self._emit_interval_seconds,
                 "loopRunning": self._loop_enabled.is_set(),
+                "heartbeatIntervalSeconds": self._heartbeat_interval_seconds,
+                "heartbeatRunning": self._heartbeat_enabled.is_set(),
                 "backendDevicesUrl": self._backend_devices_url,
                 "deviceCount": len(self._device_ids),
                 "deviceIds": self._device_ids,
@@ -134,6 +141,19 @@ class SimulatorApi:
                 return jsonify({"status": "error", "message": "action must be 'start' or 'stop'"}), 400
             return jsonify({"status": "ok", "loopRunning": self._loop_enabled.is_set()}), 200
 
+        @app.route("/heartbeat", methods=["POST"])
+        def heartbeat_control():
+            """Pausa los heartbeats para simular sensores caidos sin apagar el simulador."""
+            body = request.get_json(silent=True) or {}
+            action = body.get("action")
+            if action == "start":
+                self._heartbeat_enabled.set()
+            elif action == "stop":
+                self._heartbeat_enabled.clear()
+            else:
+                return jsonify({"status": "error", "message": "action must be 'start' or 'stop'"}), 400
+            return jsonify({"status": "ok", "heartbeatRunning": self._heartbeat_enabled.is_set()}), 200
+
     # ---------- emission ----------
 
     def _emit_once(self, device_id=None):
@@ -149,8 +169,20 @@ class SimulatorApi:
                 logger.exception("Simulation loop error: %s", e)
             time.sleep(self._emit_interval_seconds)
 
+    def _heartbeat_loop(self):
+        """Cada device reporta que sigue vivo, aunque el loop de señales este pausado."""
+        while True:
+            try:
+                if self._heartbeat_enabled.is_set():
+                    for device_id in list(self._device_ids):
+                        self._publisher.publish_heartbeat(device_id)
+            except Exception as e:  # el loop nunca debe morir por un heartbeat fallido
+                logger.exception("Heartbeat loop error: %s", e)
+            time.sleep(self._heartbeat_interval_seconds)
+
     def run(self, host: str = "0.0.0.0", port: int = 5000):
         self._publisher.connect()
         threading.Thread(target=self._simulation_loop, daemon=True).start()
+        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
         logger.info("Simulator API listening on %s:%s", host, port)
         self._app.run(host=host, port=port)

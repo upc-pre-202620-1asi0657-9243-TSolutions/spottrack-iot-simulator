@@ -45,6 +45,8 @@ class MqttPublisher:
         self._failed_count = 0
         self._delivered_count = 0
         self._last_publish_at: Optional[str] = None
+        self._heartbeat_count = 0
+        self._last_heartbeat_at: Optional[str] = None
         self._recent: deque = deque(maxlen=RECENT_SIGNALS_SIZE)
         self._pending_mids = {}
         self._early_acks = set()
@@ -139,6 +141,27 @@ class MqttPublisher:
 
         return record
 
+    def publish_heartbeat(self, device_id: str) -> bool:
+        """Sign of life for one device; the backend marks it offline when these stop.
+
+        QoS 0 on purpose: a lost heartbeat is simply replaced by the next one.
+        """
+        if not self.is_connected:
+            return False
+        topic = f"{self._topic_prefix}/{device_id}/heartbeat"
+        timestamp = _now()
+        payload = json.dumps({"deviceId": device_id, "timestamp": timestamp})
+        info = self._client.publish(topic, payload, qos=0)
+        sent = info.rc == mqtt.MQTT_ERR_SUCCESS
+        if sent:
+            with self._lock:
+                self._heartbeat_count += 1
+                self._last_heartbeat_at = timestamp
+            logger.debug("Heartbeat published: %s (topic %s)", device_id, topic)
+        else:
+            logger.warning("Heartbeat NOT published: %s (%s)", device_id, mqtt.error_string(info.rc))
+        return sent
+
     # ---------- introspection ----------
 
     @property
@@ -159,6 +182,8 @@ class MqttPublisher:
                 "failed": self._failed_count,
                 "pending": len(self._pending_mids),
                 "lastPublishAt": self._last_publish_at,
+                "heartbeats": self._heartbeat_count,
+                "lastHeartbeatAt": self._last_heartbeat_at,
                 "lastError": self._last_error,
             }
 
