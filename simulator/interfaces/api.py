@@ -67,6 +67,7 @@ class SimulatorApi:
         def update_devices():
             try:
                 self._device_ids = self._fetch_devices()
+                self._publisher.set_devices(self._device_ids)
                 self._last_update_at = datetime.now(timezone.utc).isoformat()
                 self._last_update_error = None
                 return jsonify({"status": "ok", "count": len(self._device_ids), "deviceIds": self._device_ids}), 200
@@ -87,6 +88,7 @@ class SimulatorApi:
             if not isinstance(device_ids, list) or not all(isinstance(d, str) for d in device_ids):
                 return jsonify({"status": "error", "message": "deviceIds must be a list of strings"}), 400
             self._device_ids = device_ids
+            self._publisher.set_devices(self._device_ids)
             self._last_update_at = datetime.now(timezone.utc).isoformat()
             return jsonify({"status": "ok", "count": len(self._device_ids), "deviceIds": self._device_ids}), 200
 

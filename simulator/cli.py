@@ -17,6 +17,9 @@ MQTT_HOST = os.environ.get("MQTT_HOST", "localhost")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
 BACKEND_DEVICES_URL = os.environ.get("BACKEND_DEVICES_URL", "http://localhost:8080/api/devices")
 TOPIC_PREFIX = os.environ.get("MQTT_TOPIC_PREFIX", "sensors")
+# Brokers endurecidos (Iteracion 5): CA del TLS y JSON {device_id: secreto}
+MQTT_CA_CERT = os.environ.get("MQTT_CA_CERT") or None
+MQTT_CREDENTIALS_FILE = os.environ.get("MQTT_CREDENTIALS_FILE") or None
 
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 
@@ -81,7 +84,9 @@ def _render_stats(stats):
         "",
         "MQTT publisher",
         f"  broker            {mqtt_stats['host']}:{mqtt_stats['port']} (prefix {mqtt_stats['topicPrefix']}/)",
-        f"  connected         {_ok(mqtt_stats['connected'])}",
+        f"  connected         {_ok(mqtt_stats['connected'])}"
+        + (f" ({mqtt_stats['connectionsUp']}/{mqtt_stats['connections']} device connections, TLS {_ok(mqtt_stats['tls'])})"
+           if mqtt_stats.get("auth") == "per-device" else ""),
         f"  signals sent      {mqtt_stats['published']}",
         f"  confirmed by lib  {mqtt_stats['delivered']}",
         f"  failed            {mqtt_stats['failed']}",
@@ -122,7 +127,7 @@ def cmd_serve(args):
     import logging
 
     from interfaces.api import SimulatorApi
-    from interfaces.mqtt_publisher import MqttPublisher
+    from interfaces.mqtt_publisher import MqttPublisher, load_credentials
     from model.signal import SignalDurationConfig
     from model.signal_generator import SignalGenerator
 
@@ -135,7 +140,13 @@ def cmd_serve(args):
         min_duration_ms=args.min_duration_min * 60 * 1000,
         max_duration_ms=args.max_duration_min * 60 * 1000,
     ))
-    publisher = MqttPublisher(host=args.mqtt_host, port=args.mqtt_port, topic_prefix=args.topic_prefix)
+    publisher = MqttPublisher(
+        host=args.mqtt_host,
+        port=args.mqtt_port,
+        topic_prefix=args.topic_prefix,
+        credentials=load_credentials(args.credentials_file),
+        ca_cert=args.ca_cert,
+    )
     api = SimulatorApi(
         generator=generator,
         publisher=publisher,
@@ -277,6 +288,10 @@ def cmd_listen(args):
         print(f"{time.strftime('%H:%M:%S')}  {_color('RECV', GREEN)}  {message.topic}  {payload}", flush=True)
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    if args.username:
+        client.username_pw_set(args.username, args.password)
+    if args.ca_cert:
+        client.tls_set(ca_certs=args.ca_cert)
     client.on_connect = on_connect
     client.on_message = on_message
     try:
@@ -315,6 +330,9 @@ def build_parser():
     p.add_argument("--mqtt-port", type=int, default=MQTT_PORT)
     p.add_argument("--topic-prefix", default=TOPIC_PREFIX)
     p.add_argument("--backend-url", default=BACKEND_DEVICES_URL)
+    p.add_argument("--ca-cert", default=MQTT_CA_CERT, help="CA file to connect with TLS")
+    p.add_argument("--credentials-file", default=MQTT_CREDENTIALS_FILE,
+                   help="JSON {device_id: password}; one authenticated connection per device")
     p.add_argument("--interval", type=int, default=int(os.environ.get("EMIT_INTERVAL_SECONDS", 8)),
                    help="seconds between emitted signals")
     p.add_argument("--heartbeat-interval", type=int,
@@ -360,6 +378,9 @@ def build_parser():
     p.add_argument("--mqtt-port", type=int, default=MQTT_PORT)
     p.add_argument("--topic-prefix", default=TOPIC_PREFIX)
     p.add_argument("--topic", help="full topic filter (default: <prefix>/#)")
+    p.add_argument("--ca-cert", default=MQTT_CA_CERT, help="CA file to connect with TLS")
+    p.add_argument("--username", help="MQTT user (e.g. the backend service account)")
+    p.add_argument("--password")
     p.set_defaults(func=cmd_listen)
 
     return parser
