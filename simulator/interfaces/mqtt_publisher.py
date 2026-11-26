@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional
 
 import paho.mqtt.client as mqtt
 
+from model.payload_profiles import DEFAULT_PROFILE, heartbeat_payload, signal_payload
 from model.signal import Signal
 
 logger = logging.getLogger(__name__)
@@ -43,12 +44,15 @@ class MqttPublisher:
     """
 
     def __init__(self, host: str, port: int = 1883, topic_prefix: str = "sensors",
-                 credentials: Optional[Dict[str, str]] = None, ca_cert: Optional[str] = None):
+                 credentials: Optional[Dict[str, str]] = None, ca_cert: Optional[str] = None,
+                 profiles: Optional[Dict[str, str]] = None):
         self._host = host
         self._port = port
         self._topic_prefix = topic_prefix
         self._credentials = credentials
         self._ca_cert = ca_cert
+        # payloadProfile per device (from the pairing QR); the rest publish the default format
+        self._profiles = dict(profiles or {})
 
         self._lock = threading.Lock()
         self._started = False
@@ -170,6 +174,9 @@ class MqttPublisher:
                 # el ack llegó antes de que publish_signal registrara el mid
                 self._early_acks.add((key, mid))
 
+    def profile_of(self, device_id: str) -> str:
+        return self._profiles.get(device_id, DEFAULT_PROFILE)
+
     def _client_for(self, device_id: str):
         key = device_id if self._per_device else SHARED
         with self._lock:
@@ -179,7 +186,8 @@ class MqttPublisher:
 
     def publish_signal(self, signal: Signal) -> dict:
         topic = f"{self._topic_prefix}/{signal.device_id}/signal"
-        payload = json.dumps(signal.to_dict())
+        profile = self.profile_of(signal.device_id)
+        payload = json.dumps(signal_payload(signal, profile))
         key, client, _ = self._client_for(signal.device_id)
         if client is None:
             sent, mid, error = False, None, f"no MQTT connection for {signal.device_id}"
@@ -191,6 +199,7 @@ class MqttPublisher:
         record = {
             "topic": topic,
             "deviceId": signal.device_id,
+            "profile": profile,
             "signalType": signal.signal_type,
             "durationMs": signal.duration_ms,
             "timestamp": signal.timestamp,
@@ -218,8 +227,8 @@ class MqttPublisher:
 
         if sent:
             logger.info(
-                "Signal published: %s duration %.1fs (topic %s, mid %s)",
-                signal.device_id, signal.duration_ms / 1000, topic, mid
+                "Signal published: %s duration %.1fs (topic %s, profile %s, mid %s)",
+                signal.device_id, signal.duration_ms / 1000, topic, profile, mid
             )
         else:
             logger.error("Signal NOT published: %s (%s)", signal.device_id, record["error"])
@@ -236,7 +245,7 @@ class MqttPublisher:
             return False
         topic = f"{self._topic_prefix}/{device_id}/heartbeat"
         timestamp = _now()
-        payload = json.dumps({"deviceId": device_id, "timestamp": timestamp})
+        payload = json.dumps(heartbeat_payload(device_id, timestamp, self.profile_of(device_id)))
         info = client.publish(topic, payload, qos=0)
         sent = info.rc == mqtt.MQTT_ERR_SUCCESS
         if sent:
@@ -269,6 +278,7 @@ class MqttPublisher:
                 "connections": len(self._connected),
                 "connectionsUp": sum(self._connected.values()),
                 "devicesWithoutCredentials": sorted(self._missing_credentials),
+                "profiles": dict(self._profiles),
                 "connectedAt": self._connected_at,
                 "published": self._published_count,
                 "delivered": self._delivered_count,

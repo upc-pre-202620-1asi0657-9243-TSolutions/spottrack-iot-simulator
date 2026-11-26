@@ -20,6 +20,8 @@ TOPIC_PREFIX = os.environ.get("MQTT_TOPIC_PREFIX", "sensors")
 # Brokers endurecidos (Iteracion 5): CA del TLS y JSON {device_id: secreto}
 MQTT_CA_CERT = os.environ.get("MQTT_CA_CERT") or None
 MQTT_CREDENTIALS_FILE = os.environ.get("MQTT_CREDENTIALS_FILE") or None
+# TA-04: payloadJson del QR de pairing (deviceId, secret, host, port, caSha256, exp, profile)
+PAIRING_JSON = os.environ.get("PAIRING_JSON") or None
 
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 
@@ -80,7 +82,8 @@ def _render_stats(stats):
         f"  heartbeat         {_ok(stats['heartbeatRunning'])} (every {stats['heartbeatIntervalSeconds']}s)",
         f"  devices loaded    {stats['deviceCount']}",
         f"  last device sync  {_ago(stats['lastUpdateAt'])}",
-        f"  backend           {stats['backendDevicesUrl']}",
+        f"  backend           {stats['backendDevicesUrl']}"
+        + (" (not used: devices come from the pairing QR)" if stats.get("deviceSource") == "pairing" else ""),
         "",
         "MQTT publisher",
         f"  broker            {mqtt_stats['host']}:{mqtt_stats['port']} (prefix {mqtt_stats['topicPrefix']}/)",
@@ -95,6 +98,8 @@ def _render_stats(stats):
         f"  heartbeats sent   {mqtt_stats['heartbeats']}",
         f"  last heartbeat    {_ago(mqtt_stats['lastHeartbeatAt'])}",
     ]
+    if mqtt_stats.get("profiles"):
+        lines.append("  payload profiles  " + ", ".join(f"{d}={p}" for d, p in mqtt_stats["profiles"].items()))
     if stats.get("lastUpdateError"):
         lines.append(_color(f"  device sync error {stats['lastUpdateError']}", YELLOW))
     if mqtt_stats.get("lastError"):
@@ -128,6 +133,7 @@ def cmd_serve(args):
 
     from interfaces.api import SimulatorApi
     from interfaces.mqtt_publisher import MqttPublisher, load_credentials
+    from model.pairing import PairingError, load_pairings
     from model.signal import SignalDurationConfig
     from model.signal_generator import SignalGenerator
 
@@ -136,16 +142,38 @@ def cmd_serve(args):
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
 
+    pairing_texts = args.pairing_json or ([PAIRING_JSON] if PAIRING_JSON else [])
+    mqtt_host, mqtt_port, profiles, initial_devices = args.mqtt_host, args.mqtt_port, None, None
+    if pairing_texts:
+        if args.credentials_file:
+            print(_color("Use either --pairing-json/PAIRING_JSON or --credentials-file, not both.", RED), file=sys.stderr)
+            raise SystemExit(2)
+        try:
+            paired = load_pairings(pairing_texts, args.ca_cert)
+        except (PairingError, OSError) as e:
+            # QR invalido, caducado o CA que no coincide: no se conecta ni se envian credenciales
+            print(_color(f"Pairing rejected: {e}", RED), file=sys.stderr)
+            raise SystemExit(2)
+        credentials = paired.credentials
+        mqtt_host, mqtt_port = paired.host, paired.port
+        profiles, initial_devices = paired.profiles, paired.device_ids
+        logging.getLogger("pairing").info(
+            "Paired %d device(s) from QR against %s:%s: %s", len(initial_devices), mqtt_host, mqtt_port,
+            ", ".join(f"{d} (profile {p})" for d, p in profiles.items()))
+    else:
+        credentials = load_credentials(args.credentials_file)
+
     generator = SignalGenerator(SignalDurationConfig(
         min_duration_ms=args.min_duration_min * 60 * 1000,
         max_duration_ms=args.max_duration_min * 60 * 1000,
     ))
     publisher = MqttPublisher(
-        host=args.mqtt_host,
-        port=args.mqtt_port,
+        host=mqtt_host,
+        port=mqtt_port,
         topic_prefix=args.topic_prefix,
-        credentials=load_credentials(args.credentials_file),
+        credentials=credentials,
         ca_cert=args.ca_cert,
+        profiles=profiles,
     )
     api = SimulatorApi(
         generator=generator,
@@ -153,6 +181,7 @@ def cmd_serve(args):
         backend_devices_url=args.backend_url,
         emit_interval_seconds=args.interval,
         heartbeat_interval_seconds=args.heartbeat_interval,
+        initial_device_ids=initial_devices,
     )
     api.run(host=args.host, port=args.port)
 
@@ -332,7 +361,11 @@ def build_parser():
     p.add_argument("--backend-url", default=BACKEND_DEVICES_URL)
     p.add_argument("--ca-cert", default=MQTT_CA_CERT, help="CA file to connect with TLS")
     p.add_argument("--credentials-file", default=MQTT_CREDENTIALS_FILE,
-                   help="JSON {device_id: password}; one authenticated connection per device")
+                   help="LEGACY (static brokers): JSON {device_id: password}; one authenticated connection per device")
+    p.add_argument("--pairing-json", action="append", metavar="PAYLOAD_JSON",
+                   help="payloadJson of a pairing QR (v2); repeat for several devices. "
+                        "Default: PAIRING_JSON. Takes deviceId/secret/host/port/profile from it "
+                        "and requires --ca-cert matching caSha256")
     p.add_argument("--interval", type=int, default=int(os.environ.get("EMIT_INTERVAL_SECONDS", 8)),
                    help="seconds between emitted signals")
     p.add_argument("--heartbeat-interval", type=int,

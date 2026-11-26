@@ -21,14 +21,17 @@ class SimulatorApi:
         publisher: MqttPublisher,
         backend_devices_url: str,
         emit_interval_seconds: int = 8,
-        heartbeat_interval_seconds: int = 10
+        heartbeat_interval_seconds: int = 10,
+        initial_device_ids=None
     ):
         self._generator = generator
         self._publisher = publisher
         self._backend_devices_url = backend_devices_url
         self._emit_interval_seconds = emit_interval_seconds
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
-        self._device_ids = []
+        # paired devices start loaded: they do not depend on the backend's device list
+        self._device_ids = list(initial_device_ids or [])
+        self._paired = bool(self._device_ids)
         self._started_at = datetime.now(timezone.utc)
         self._last_update_at = None
         self._last_update_error = None
@@ -65,6 +68,8 @@ class SimulatorApi:
 
         @app.route("/update", methods=["POST"])
         def update_devices():
+            if self._paired:
+                return jsonify({"status": "error", "message": "devices come from the pairing QR"}), 409
             try:
                 self._device_ids = self._fetch_devices()
                 self._publisher.set_devices(self._device_ids)
@@ -83,6 +88,8 @@ class SimulatorApi:
         @app.route("/devices", methods=["PUT"])
         def set_devices():
             """Carga ids de dispositivos a mano (útil para probar sin el backend)."""
+            if self._paired:
+                return jsonify({"status": "error", "message": "devices come from the pairing QR"}), 409
             body = request.get_json(silent=True) or {}
             device_ids = body.get("deviceIds")
             if not isinstance(device_ids, list) or not all(isinstance(d, str) for d in device_ids):
@@ -104,6 +111,7 @@ class SimulatorApi:
                 "backendDevicesUrl": self._backend_devices_url,
                 "deviceCount": len(self._device_ids),
                 "deviceIds": self._device_ids,
+                "deviceSource": "pairing" if self._paired else "backend",
                 "lastUpdateAt": self._last_update_at,
                 "lastUpdateError": self._last_update_error,
                 "mqtt": self._publisher.stats(),
@@ -184,6 +192,9 @@ class SimulatorApi:
 
     def run(self, host: str = "0.0.0.0", port: int = 5000):
         self._publisher.connect()
+        if self._device_ids:
+            self._publisher.set_devices(self._device_ids)
+            self._last_update_at = datetime.now(timezone.utc).isoformat()
         threading.Thread(target=self._simulation_loop, daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
         logger.info("Simulator API listening on %s:%s", host, port)

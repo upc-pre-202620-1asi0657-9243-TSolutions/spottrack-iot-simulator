@@ -30,12 +30,60 @@ Configuration comes from flags or environment variables:
 | `EMIT_INTERVAL_SECONDS` | `--interval` | `8` |
 | `HEARTBEAT_INTERVAL_SECONDS` | `--heartbeat-interval` | `10` |
 | — | `--min-duration-min` / `--max-duration-min` | `5` / `20` |
+| `MQTT_CA_CERT` | `--ca-cert` | — (plain TCP) |
+| `PAIRING_JSON` | `--pairing-json` (repeatable) | — |
+| `MQTT_CREDENTIALS_FILE` | `--credentials-file` (legacy) | — |
 
 The MQTT connection is made in the background: if the broker is down the simulator
 still starts, keeps retrying and reconnects on its own. Signals published while
 disconnected are counted as failed and shown as such by the CLI.
 
-Signals are published to `sensors/<deviceId>/signal` as:
+### Pairing by QR (recommended, TA-04)
+
+Instead of passwords taken from Terraform outputs, a sensor gets its credentials
+and payload profile from the pairing QR issued by the backend
+(`POST /api/v1/monitoring/motion-sensors/<id>/pairing`, ADMIN, optional body
+`{"payloadProfile":"compact-emulator"}`). Pass the response's `payloadJson`
+(the exact QR text, format v2) to the simulator:
+
+```bash
+# CA of the brokers (spottrack-platform/infra/terraform)
+./tf.sh dev output -raw mqtt_ca_cert > mqtt-ca.crt
+
+PAIRING_JSON="$(jq -r .payloadJson pairing.json)" \
+  python simulator/cli.py serve --ca-cert mqtt-ca.crt
+# several sensors: --pairing-json '<payloadJson 1>' --pairing-json '<payloadJson 2>'
+```
+
+Before connecting, the simulator checks the QR like a device would and **does not
+connect** (exit code 2, `Pairing rejected: ...`) when:
+
+* the JSON is malformed, a field is missing or `v` is not `2`;
+* `exp` already passed (`QR expired`);
+* `profile` is not one it can publish (`default`, `compact-emulator`);
+* the SHA-256 of `--ca-cert` (DER) does not match `caSha256` (`CA not recognised`),
+  or no CA was given.
+
+If the QR is valid, it connects over TLS to the `host:port` from the QR (`--mqtt-host`/`--mqtt-port`
+are ignored) as user `deviceId` with password `secret`, and publishes heartbeats and
+signals in the QR's `profile`. The first heartbeat makes the backend mark the pairing as `USED`.
+Paired devices are fixed: `update` and `devices` answer 409 because the backend's
+device list is not used. The secret is never logged nor returned by the API.
+`--pairing-json` and `--credentials-file` cannot be used together.
+
+`--credentials-file` (`{device_id: password}` from `terraform output mqtt_device_credentials`)
+is **legacy**, only for brokers in `static` mode.
+
+### Payload profiles
+
+| Profile | `sensors/<id>/signal` | `sensors/<id>/heartbeat` |
+|---|---|---|
+| `default` | `{"deviceId","signalType","durationMs","timestamp"}` | `{"deviceId","timestamp"}` |
+| `compact-emulator` | `{"dev","sig":"mv","dur"(seconds),"ts"}` | `{"dev","sig":"hb","ts"}` |
+
+Devices without a pairing use `default`.
+
+Signals in the `default` profile are published to `sensors/<deviceId>/signal` as:
 
 ```json
 {"deviceId": "SENSOR-001", "signalType": "ACTIVATED", "durationMs": 585000, "timestamp": "2026-09-02T05:19:41+00:00"}
@@ -57,6 +105,12 @@ a sensor go offline, stop the simulator, or pause both loops without stopping it
 ```bash
 python simulator/cli.py heartbeat stop
 python simulator/cli.py loop stop
+```
+
+## Tests
+
+```bash
+python -m unittest discover -s tests
 ```
 
 ## CLI
